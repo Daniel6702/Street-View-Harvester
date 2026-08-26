@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streetview-dataset"
+version = "0.1.0"
+description = "Small high-level toolkit for harvesting Street View panorama IDs and dataset imagery."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "geopandas>=0.14",
+    "shapely>=2.0",
+    "pyproj>=3.6",
+    "Pillow>=10.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["streetview_dataset*"]
+
+[tool.setuptools.package-data]
+streetview_dataset = ["data/*.geojson"]
