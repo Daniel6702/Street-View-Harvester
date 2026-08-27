@@ -4,7 +4,7 @@ import threading
 import pytest
 
 import streetview_dataset.dataset as dataset_module
-from streetview_dataset import Panorama, StreetViewDataset
+from streetview_dataset import MonitorConfig, Panorama, StreetViewDataset
 
 
 class FakeProgress:
@@ -59,6 +59,7 @@ def test_aggregate_methods_accept_progress(method_name):
     method = getattr(StreetViewDataset, method_name)
 
     assert inspect.signature(method).parameters["progress"].default is None
+    assert inspect.signature(method).parameters["monitor"].default is None
 
 
 def test_progress_uses_target_existing_count_and_closes(fake_tqdm, unique_lookup, tmp_path):
@@ -80,6 +81,20 @@ def test_resume_complete_creates_no_progress_bar(fake_tqdm, unique_lookup, tmp_p
     dataset._append_rows([{"panoid": "already-seen"}])
 
     result = dataset.radius(0.0, 0.0, 10.0, 1, progress=True)
+
+    assert result.complete
+    assert fake_tqdm.instances == []
+
+
+def test_resume_complete_creates_no_monitor(fake_tqdm, unique_lookup, monkeypatch, tmp_path):
+    dataset = StreetViewDataset(tmp_path, workers=1, seed=1)
+    dataset._append_rows([{"panoid": "already-seen"}])
+
+    def fail_if_started(*_args, **_kwargs):
+        pytest.fail("a no-op resume must not start a monitor")
+
+    monkeypatch.setattr(dataset_module, "Monitor", fail_if_started)
+    result = dataset.radius(0.0, 0.0, 10.0, 1, monitor=MonitorConfig())
 
     assert result.complete
     assert fake_tqdm.instances == []

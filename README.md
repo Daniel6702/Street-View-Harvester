@@ -9,6 +9,7 @@ It supports:
 - safe threaded lookup/download with retries and connection reuse
 - tqdm progress reporting, CSV checkpointing, and panorama-ID deduplication/resume
 - flat perspective images, stitched 180° half panoramas, and stitched 360° panoramas
+- optional loopback-only monitoring for one aggregate harvest
 
 There is intentionally no database layer, provider abstraction, GUI, or distributed worker system.
 
@@ -52,6 +53,44 @@ sv.geojson("boundaries/aarhus.geojson", count=5_000, download="flat")
 Use `progress=True` to force a bar when output is redirected, `progress=False` to disable it, or leave the default `progress=None` for TTY-aware behavior. The bar resumes from existing metadata and is updated only by the coordinator thread, so it is safe with threaded lookup/rendering and file or ZIP storage. For ZIP output, an item advances once it has been written to the active shard; the shard is atomically published at finalization.
 
 If `metadata.csv` already exists, its panorama IDs are loaded automatically. Calling the same command again resumes toward the requested total count.
+
+### Optional web monitor
+
+Pass `MonitorConfig()` to an aggregate harvest to start a temporary, read-only
+status page on an ephemeral loopback port. The `on_start` callback receives the
+actual URL after the socket is bound:
+
+```python
+from streetview_dataset import MonitorConfig, StreetViewDataset
+
+sv = StreetViewDataset("datasets/denmark", workers=32, seed=42)
+sv.country(
+    "Denmark",
+    10_000,
+    monitor=MonitorConfig(on_start=lambda url: print(f"Monitor: {url}")),
+)
+```
+
+The package logger also records that URL. The page auto-refreshes a scalar JSON
+snapshot from `GET /api/v1/progress`, including coordinator-derived pace in
+items per second; `GET /healthz` is available for a simple health check. The
+monitor is opt-in, serves only on `127.0.0.1`, and shuts down after harvest
+cleanup, including interrupted or failed cleanup paths.
+
+To view it from your workstation when the harvest runs on a remote host, use an
+SSH local port forward after choosing a fixed local monitor port:
+
+```python
+sv.country("Denmark", 10_000, monitor=MonitorConfig(port=8765))
+```
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 user@remote-host
+```
+
+Loopback endpoints remain readable by processes on the same shared node. This
+monitor intentionally publishes only non-sensitive scalar progress, not paths,
+source values, metadata rows, logs, or harvest details.
 
 ## Country + images
 

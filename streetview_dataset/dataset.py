@@ -5,6 +5,7 @@ import logging
 import math
 import os
 import re
+import time
 import zipfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,6 +21,7 @@ from tqdm import tqdm
 from .client import StreetViewClient
 from .geo import CountryIndex, haversine_m, load_geojson, sample_bbox, sample_radius
 from .models import HarvestResult, Panorama
+from .monitor import Monitor, MonitorConfig, _ProgressSnapshot
 from .stitch import (
     _max_yaw_offset,
     decode_rgb,
@@ -373,6 +375,7 @@ class StreetViewDataset:
         height: int = 1024,
         max_queries: int | None = None,
         progress: bool | None = None,
+        monitor: MonitorConfig | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas whose resolved coordinates are in a country."""
         geometry = self._country_index.get(country)
@@ -397,6 +400,7 @@ class StreetViewDataset:
             height=height,
             max_queries=max_queries,
             progress=progress,
+            monitor=monitor,
         )
 
     def radius(
@@ -414,6 +418,7 @@ class StreetViewDataset:
         height: int = 1024,
         max_queries: int | None = None,
         progress: bool | None = None,
+        monitor: MonitorConfig | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas within a distance of a point."""
 
@@ -437,6 +442,7 @@ class StreetViewDataset:
             height=height,
             max_queries=max_queries,
             progress=progress,
+            monitor=monitor,
         )
 
     def bbox(
@@ -455,6 +461,7 @@ class StreetViewDataset:
         height: int = 1024,
         max_queries: int | None = None,
         progress: bool | None = None,
+        monitor: MonitorConfig | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas inside a latitude/longitude box."""
 
@@ -478,6 +485,7 @@ class StreetViewDataset:
             height=height,
             max_queries=max_queries,
             progress=progress,
+            monitor=monitor,
         )
 
     def geojson(
@@ -493,6 +501,7 @@ class StreetViewDataset:
         height: int = 1024,
         max_queries: int | None = None,
         progress: bool | None = None,
+        monitor: MonitorConfig | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas inside polygonal GeoJSON."""
         geometry = load_geojson(path)
@@ -517,6 +526,7 @@ class StreetViewDataset:
             height=height,
             max_queries=max_queries,
             progress=progress,
+            monitor=monitor,
         )
 
     def _load_seen(self, download: ImageMode) -> tuple[set[str], int]:
@@ -635,6 +645,7 @@ class StreetViewDataset:
         height: int,
         max_queries: int | None,
         progress: bool | None,
+        monitor: MonitorConfig | None,
     ) -> HarvestResult:
         if count < 1:
             raise ValueError("count must be >= 1")
@@ -662,6 +673,11 @@ class StreetViewDataset:
             max_queries = max(1000, needed * 25)
         if max_queries < needed:
             raise ValueError("max_queries must be >= the number of requested new samples")
+
+        monitor_server = Monitor(monitor) if monitor is not None else None
+        rate_started_at = time.monotonic() if monitor_server is not None else 0.0
+        interrupted = False
+        complete = False
 
         # Persistent datasets never retain all rows in RAM. For the uncommon
         # root=None case, rows are retained because there is nowhere else to put
@@ -703,7 +719,6 @@ class StreetViewDataset:
         lookup_executor = ThreadPoolExecutor(max_workers=self.workers)
         image_workers = self.workers if download == "flat" else min(self.workers, self.panorama_workers)
         download_executor = ThreadPoolExecutor(max_workers=max(1, image_workers)) if download != "none" else None
-        interrupted = False
         progress_bar = tqdm(
             total=count,
             initial=existing_count,
@@ -712,6 +727,39 @@ class StreetViewDataset:
         )
 
         try:
+            unit: Literal["panorama", "image"] = "panorama" if download == "none" else "image"
+
+            def publish_monitor(state: Literal["running", "complete", "stopped"] = "running") -> None:
+                if monitor_server is not None:
+                    elapsed = max(0.0, time.monotonic() - rate_started_at)
+                    rate_per_second = added / elapsed if elapsed > 0.0 else 0.0
+                    monitor_server.publish(
+                        _ProgressSnapshot(
+                            state=state,
+                            current=existing_count + added,
+                            target=count,
+                            added=added,
+                            queries=queries,
+                            unit=unit,
+                            last_update=time.time(),
+                            rate_per_second=rate_per_second,
+                        )
+                    )
+
+            if monitor_server is not None:
+                monitor_server.start(
+                    _ProgressSnapshot(
+                        state="running",
+                        current=existing_count,
+                        target=count,
+                        added=0,
+                        queries=0,
+                        unit=unit,
+                        last_update=time.time(),
+                        rate_per_second=0.0,
+                    )
+                )
+
             while added < needed and queries < max_queries:
                 remaining_queries = max_queries - queries
                 n = min(batch_size, remaining_queries)
@@ -754,6 +802,7 @@ class StreetViewDataset:
                     added += len(rows)
                     if rows:
                         progress_bar.update(len(rows))
+                    publish_monitor()
                 else:
                     assert download_executor is not None
                     download_futures = {
@@ -786,6 +835,9 @@ class StreetViewDataset:
                             commit_rows(finalized_rows)
                         added += 1
                         progress_bar.update()
+                        publish_monitor()
+                    if not download_futures:
+                        publish_monitor()
 
                 log.info(
                     "Collected %d/%d new panoramas (%d queries, %d total unique IDs seen)",
@@ -800,23 +852,29 @@ class StreetViewDataset:
             log.warning("Harvest interrupted; finalizing completed work")
         finally:
             try:
-                lookup_executor.shutdown(wait=True, cancel_futures=True)
-                if download_executor is not None:
-                    download_executor.shutdown(wait=True, cancel_futures=True)
+                try:
+                    lookup_executor.shutdown(wait=True, cancel_futures=True)
+                    if download_executor is not None:
+                        download_executor.shutdown(wait=True, cancel_futures=True)
 
-                if zip_store is not None:
-                    try:
-                        # Graceful interruption publishes the final short shard.
-                        commit_rows(zip_store.finalize())
-                    except Exception:
-                        zip_store.abort()
-                        raise
+                    if zip_store is not None:
+                        try:
+                            # Graceful interruption publishes the final short shard.
+                            commit_rows(zip_store.finalize())
+                        except Exception:
+                            zip_store.abort()
+                            raise
 
-                if pending_save:
-                    self._append_rows(pending_save)
-                    pending_save = []
+                    if pending_save:
+                        self._append_rows(pending_save)
+                        pending_save = []
+                finally:
+                    progress_bar.close()
+                complete = added >= needed and not interrupted
+                publish_monitor("complete" if complete else "stopped")
             finally:
-                progress_bar.close()
+                if monitor_server is not None:
+                    monitor_server.stop()
 
         total_count = existing_count + added if self.root is not None else added
         complete = added >= needed and not interrupted
