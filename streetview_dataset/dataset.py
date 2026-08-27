@@ -15,6 +15,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 from PIL import Image
+from tqdm import tqdm
 
 from .client import StreetViewClient
 from .geo import CountryIndex, haversine_m, load_geojson, sample_bbox, sample_radius
@@ -371,6 +372,7 @@ class StreetViewDataset:
         width: int = 1024,
         height: int = 1024,
         max_queries: int | None = None,
+        progress: bool | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas whose resolved coordinates are in a country."""
         geometry = self._country_index.get(country)
@@ -394,6 +396,7 @@ class StreetViewDataset:
             width=width,
             height=height,
             max_queries=max_queries,
+            progress=progress,
         )
 
     def radius(
@@ -410,6 +413,7 @@ class StreetViewDataset:
         width: int = 1024,
         height: int = 1024,
         max_queries: int | None = None,
+        progress: bool | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas within a distance of a point."""
 
@@ -432,6 +436,7 @@ class StreetViewDataset:
             width=width,
             height=height,
             max_queries=max_queries,
+            progress=progress,
         )
 
     def bbox(
@@ -449,6 +454,7 @@ class StreetViewDataset:
         width: int = 1024,
         height: int = 1024,
         max_queries: int | None = None,
+        progress: bool | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas inside a latitude/longitude box."""
 
@@ -471,6 +477,7 @@ class StreetViewDataset:
             width=width,
             height=height,
             max_queries=max_queries,
+            progress=progress,
         )
 
     def geojson(
@@ -485,6 +492,7 @@ class StreetViewDataset:
         width: int = 1024,
         height: int = 1024,
         max_queries: int | None = None,
+        progress: bool | None = None,
     ) -> HarvestResult:
         """Collect random unique panoramas inside polygonal GeoJSON."""
         geometry = load_geojson(path)
@@ -508,6 +516,7 @@ class StreetViewDataset:
             width=width,
             height=height,
             max_queries=max_queries,
+            progress=progress,
         )
 
     def _load_seen(self, download: ImageMode) -> tuple[set[str], int]:
@@ -625,6 +634,7 @@ class StreetViewDataset:
         width: int,
         height: int,
         max_queries: int | None,
+        progress: bool | None,
     ) -> HarvestResult:
         if count < 1:
             raise ValueError("count must be >= 1")
@@ -694,6 +704,12 @@ class StreetViewDataset:
         image_workers = self.workers if download == "flat" else min(self.workers, self.panorama_workers)
         download_executor = ThreadPoolExecutor(max_workers=max(1, image_workers)) if download != "none" else None
         interrupted = False
+        progress_bar = tqdm(
+            total=count,
+            initial=existing_count,
+            unit="panorama" if download == "none" else "image",
+            disable=not progress if progress is not None else None,
+        )
 
         try:
             while added < needed and queries < max_queries:
@@ -734,8 +750,10 @@ class StreetViewDataset:
 
                 if download == "none":
                     rows = [row for row, _, _ in batch_new]
-                    added += len(rows)
                     commit_rows(rows)
+                    added += len(rows)
+                    if rows:
+                        progress_bar.update(len(rows))
                 else:
                     assert download_executor is not None
                     download_futures = {
@@ -767,6 +785,7 @@ class StreetViewDataset:
                             # has been closed and atomically published.
                             commit_rows(finalized_rows)
                         added += 1
+                        progress_bar.update()
 
                 log.info(
                     "Collected %d/%d new panoramas (%d queries, %d total unique IDs seen)",
@@ -780,21 +799,24 @@ class StreetViewDataset:
             interrupted = True
             log.warning("Harvest interrupted; finalizing completed work")
         finally:
-            lookup_executor.shutdown(wait=True, cancel_futures=True)
-            if download_executor is not None:
-                download_executor.shutdown(wait=True, cancel_futures=True)
+            try:
+                lookup_executor.shutdown(wait=True, cancel_futures=True)
+                if download_executor is not None:
+                    download_executor.shutdown(wait=True, cancel_futures=True)
 
-            if zip_store is not None:
-                try:
-                    # Graceful interruption publishes the final short shard.
-                    commit_rows(zip_store.finalize())
-                except Exception:
-                    zip_store.abort()
-                    raise
+                if zip_store is not None:
+                    try:
+                        # Graceful interruption publishes the final short shard.
+                        commit_rows(zip_store.finalize())
+                    except Exception:
+                        zip_store.abort()
+                        raise
 
-            if pending_save:
-                self._append_rows(pending_save)
-                pending_save = []
+                if pending_save:
+                    self._append_rows(pending_save)
+                    pending_save = []
+            finally:
+                progress_bar.close()
 
         total_count = existing_count + added if self.root is not None else added
         complete = added >= needed and not interrupted
