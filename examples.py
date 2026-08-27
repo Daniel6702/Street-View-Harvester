@@ -1,65 +1,109 @@
-import logging
-
 from streetview_dataset import StreetViewDataset
 
-logging.basicConfig(level=logging.INFO)
+WORKFLOW = "geojson"
+DOWNLOAD_MODE = "flat"
 
-'''
-Progress bar
-Currently the program exists even when no files seems to have been downloaded. Then sometimes later the files actually appears. The program should only exit once all the files has been downloaded, i assume this is a threading issue. 
-I also do not seem to get error from the threads. Atleast no files ever got downloaded from the test. This makes it quite hard to debug:
-This is the test:
-sv = StreetViewDataset(
-    "datasets/denmark", 
-    storage="files",
-    workers=4, 
-    seed=42
-)
-result = sv.country("Denmark", count=8, download="flat", width=512, height=512, fov=70)
-print(result)
-'''
+DATASET_ROOT = "datasets/denmark"
+STORAGE = "files"
+FILE_SHARDING = False
+WORKERS = 8
+SEED = 42
 
-sv = StreetViewDataset(
-    "datasets/denmark", 
-    storage="files",
-    file_sharding=False,
-    workers=8, 
-    seed=42
-)
-result = sv.country("Denmark", count=8, download="flat", width=512, height=512, fov=70)
-print(result)
+LAT = 56.1629
+LON = 10.2039
+COUNTRY = "Denmark"
+COUNT = 3
+RADIUS_KM = 10
+BBOX_WEST = 9.0
+BBOX_SOUTH = 55.0
+BBOX_EAST = 11.0
+BBOX_NORTH = 57.0
 
-# 1) Resolve a specific point.
-#pano = sv.nearest(56.1629, 10.2039)
-#print(pano)
+SINGLE_VIEW_PATH = "datasets/denmark/view.jpg"
+HALF_PANORAMA_PATH = "datasets/denmark/half.jpg"
+FULL_PANORAMA_PATH = "datasets/denmark/full.jpg"
+VIEW_YAW = 45
 
-#if pano:
-    # 2) Create a 180-degree panorama around the resolved point.
-#    sv.download_view(pano, "datasets/denmark/example.jpg")
 
-# 3) Build/resume a random country dataset.
+def main() -> None:
+    workflows = {
+        "nearest",
+        "single_view",
+        "country",
+        "radius",
+        "bbox",
+        "half_panorama",
+        "panorama",
+        "geojson"
+    }
+    if WORKFLOW not in workflows:
+        raise ValueError(f"Unknown workflow: {WORKFLOW}")
 
-# 4) Or collect near a point.
-# sv.radius(56.1629, 10.2039, radius_km=25, count=1000, download="flat")
+    sv = StreetViewDataset(
+        DATASET_ROOT,
+        storage=STORAGE,
+        file_sharding=FILE_SHARDING,
+        workers=WORKERS,
+        seed=SEED,
+    )
 
-'''
-from streetview_dataset import StreetViewDataset
+    if WORKFLOW == "nearest":
+        print(sv.nearest(LAT, LON))
+    elif WORKFLOW == "country":
+        print(sv.country(COUNTRY, count=COUNT, download=DOWNLOAD_MODE))
+    elif WORKFLOW == "radius":
+        print(
+            sv.radius(
+                lat=LAT,
+                lon=LON,
+                radius_km=RADIUS_KM,
+                count=COUNT,
+                download=DOWNLOAD_MODE,
+            )
+        )
+    elif WORKFLOW == "bbox":
+        print(
+            sv.bbox(
+                west=BBOX_WEST,
+                south=BBOX_SOUTH,
+                east=BBOX_EAST,
+                north=BBOX_NORTH,
+                count=COUNT,
+                download=DOWNLOAD_MODE,
+            )
+        )
+    elif WORKFLOW == "geojson":
+        print(
+            sv.geojson("streetview_dataset/data/aarhus_kommune.geojson",
+                       count=COUNT,
+                       download=DOWNLOAD_MODE
+            )
+        )
+    else:
+        pano = sv.nearest(LAT, LON)
+        if pano is None:
+            print("No panorama found.")
+            return
+        if WORKFLOW == "single_view":
+            print(sv.download_view(pano, SINGLE_VIEW_PATH, yaw=VIEW_YAW))
+        elif WORKFLOW == "half_panorama":
+            print(
+                sv.download_half_panorama(
+                    pano,
+                    HALF_PANORAMA_PATH,
+                    center_yaw=VIEW_YAW,
+                )
+            )
+        elif WORKFLOW == "panorama":
+            print(sv.download_panorama(pano,
+                                       "detailed.jpg",
+                                       span=360,
+                                       fov=45,
+                                       vertical_span=90,
+                                       pitch_overlap=0.30,
+                                       view_width=1024,
+                                       view_height=1024,
+                                       ))
 
-sv = StreetViewDataset(
-    "datasets/denmark",
-    workers=32,
-    storage="zip",
-    shard_size=2000,
-    seed=42,
-)
-
-result = sv.country(
-    "Denmark",
-    count=1_000_000,
-    download="flat",
-)
-
-print(result)
-
-Another small change. It should also be an option to enable, or not, the folder sharding with storage equal files. I.e. not making the two symbol subfolders.
-'''
+if __name__ == "__main__":
+    main()

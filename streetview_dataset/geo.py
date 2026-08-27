@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from difflib import get_close_matches
 from pathlib import Path
-import math
 
 import geopandas as gpd
 import numpy as np
@@ -11,6 +11,8 @@ from pyproj import Transformer
 from shapely import contains, points
 from shapely.geometry import Point
 from shapely.geometry.base import BaseGeometry
+
+from .geojson import EqualAreaSampler, GeoJSONGeometry, load_geojson
 
 
 EARTH_RADIUS_M = 6_371_008.8
@@ -179,37 +181,4 @@ class CountryIndex:
         n: int,
     ) -> list[tuple[float, float]]:
         """Sample uniformly by area from a country polygon using EPSG:6933."""
-        if n <= 0:
-            return []
-
-        geom = country.geometry_equal_area
-        minx, miny, maxx, maxy = geom.bounds
-        accepted_x: list[np.ndarray] = []
-        accepted_y: list[np.ndarray] = []
-        remaining = n
-
-        # Vectorized rejection sampling. Oversampling adapts reasonably well to
-        # irregular countries while keeping the implementation simple.
-        rounds = 0
-        while remaining > 0:
-            rounds += 1
-            if rounds > 10_000:
-                raise RuntimeError("Could not sample enough points from country geometry")
-
-            batch = max(1024, remaining * 4)
-            xs = rng.uniform(minx, maxx, batch)
-            ys = rng.uniform(miny, maxy, batch)
-            mask = contains(geom, points(xs, ys))
-            if not np.any(mask):
-                continue
-
-            xs_good = xs[mask][:remaining]
-            ys_good = ys[mask][:remaining]
-            accepted_x.append(xs_good)
-            accepted_y.append(ys_good)
-            remaining -= len(xs_good)
-
-        x = np.concatenate(accepted_x)
-        y = np.concatenate(accepted_y)
-        lon, lat = self._to_wgs84.transform(x, y)
-        return list(zip(np.asarray(lat).tolist(), np.asarray(lon).tolist()))
+        return EqualAreaSampler(country.geometry_equal_area, self._to_wgs84).sample(rng, n)

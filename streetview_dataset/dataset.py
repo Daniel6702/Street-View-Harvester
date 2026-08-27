@@ -1,25 +1,32 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from io import BytesIO
-from pathlib import Path
-from typing import Callable, Literal
 import csv
 import logging
+import math
 import os
 import re
 import zipfile
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import BytesIO
+from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
 from PIL import Image
 
 from .client import StreetViewClient
-from .geo import CountryIndex, haversine_m, sample_bbox, sample_radius
+from .geo import CountryIndex, haversine_m, load_geojson, sample_bbox, sample_radius
 from .models import HarvestResult, Panorama
+from .stitch import (
+    _max_yaw_offset,
+    decode_rgb,
+    planned_pitches,
+    planned_yaws,
+    stitch_views,
+)
 from .storage import FileImageStore, ZipShardStore
-from .stitch import decode_rgb, planned_yaws, stitch_views
-
 
 log = logging.getLogger(__name__)
 ImageMode = Literal["none", "flat", "half", "panorama"]
@@ -171,15 +178,25 @@ class StreetViewDataset:
     ) -> Path:
         """Download one ordinary flat perspective view."""
         panoid = pano.panoid if isinstance(pano, Panorama) else pano
+        path = self._resolve_output_path(out_path)
+
         return self.client.download_image(
             panoid,
-            out_path,
+            path,
             width=width,
             height=height,
             fov=fov,
             yaw=yaw,
             pitch=pitch,
         )
+    
+    def _resolve_output_path(self, out_path: str | Path) -> Path:
+        path = Path(out_path)
+
+        if not path.is_absolute() and self.root is not None:
+            path = self.root / path
+
+        return path
 
     def _panorama_image(
         self,
@@ -197,47 +214,71 @@ class StreetViewDataset:
         output_height: int | None,
         parallel_views: bool,
         auto_crop: bool,
+        vertical_span: float | None = None,
+        pitch_overlap: float = 0.30,
     ) -> Image.Image:
-        yaws = planned_yaws(
+        scalar_yaws = planned_yaws(
             span=span,
             center_yaw=center_yaw,
             fov=fov,
             overlap=overlap,
             views=views,
         )
+        if vertical_span is None:
+            planned_views: Sequence[float | tuple[float, float]] = scalar_yaws
+        else:
+            hfov = math.radians(fov)
+            vfov = math.degrees(2.0 * math.atan(math.tan(hfov / 2.0) * view_height / view_width))
+            pitches = planned_pitches(
+                span=vertical_span,
+                center_pitch=pitch,
+                vfov=vfov,
+                overlap=pitch_overlap,
+                max_yaw_offset=_max_yaw_offset(
+                    scalar_yaws,
+                    span=span,
+                    center_yaw=center_yaw,
+                ),
+            )
+            planned_views = [(yaw, source_pitch) for source_pitch in pitches for yaw in scalar_yaws]
 
-        def fetch(yaw: float):
+        def fetch(view: float | tuple[float, float]):
+            if isinstance(view, tuple):
+                yaw, source_pitch = view
+            else:
+                yaw, source_pitch = view, pitch
             data = self.client.image_bytes(
                 panoid,
                 width=view_width,
                 height=view_height,
                 fov=fov,
                 yaw=yaw,
-                pitch=pitch,
+                pitch=source_pitch,
             )
-            return yaw, decode_rgb(data)
+            return view, decode_rgb(data)
 
-        by_yaw: dict[float, np.ndarray] = {}
-        if parallel_views and len(yaws) > 1:
-            with ThreadPoolExecutor(max_workers=min(self.workers, len(yaws))) as executor:
-                futures = [executor.submit(fetch, yaw) for yaw in yaws]
+        by_view: dict[float | tuple[float, float], np.ndarray] = {}
+        if parallel_views and len(planned_views) > 1:
+            with ThreadPoolExecutor(max_workers=min(self.workers, len(planned_views))) as executor:
+                futures = [executor.submit(fetch, view) for view in planned_views]
                 for future in as_completed(futures):
-                    source_yaw, image = future.result()
-                    by_yaw[source_yaw] = image
+                    source_view, image = future.result()
+                    by_view[source_view] = image
         else:
-            for source_yaw in yaws:
-                fetched_yaw, image = fetch(source_yaw)
-                by_yaw[fetched_yaw] = image
+            for source_view in planned_views:
+                fetched_view, image = fetch(source_view)
+                by_view[fetched_view] = image
 
         return stitch_views(
-            [by_yaw[source_yaw] for source_yaw in yaws],
-            yaws,
+            [by_view[source_view] for source_view in planned_views],
+            planned_views,
             span=span,
             center_yaw=center_yaw,
             pitch=pitch,
             fov=fov,
             output_width=output_width,
             output_height=output_height,
+            vertical_span=vertical_span,
             auto_crop=auto_crop,
         )
 
@@ -259,6 +300,8 @@ class StreetViewDataset:
         jpeg_quality: int = 95,
         parallel_views: bool = True,
         auto_crop: bool = True,
+        vertical_span: float | None = None,
+        pitch_overlap: float = 0.30,
     ) -> Path:
         """Download and stitch a 1-360 degree panorama strip."""
         panoid = pano.panoid if isinstance(pano, Panorama) else pano
@@ -276,9 +319,11 @@ class StreetViewDataset:
             output_height=output_height,
             parallel_views=parallel_views,
             auto_crop=auto_crop,
+            vertical_span=vertical_span,
+            pitch_overlap=pitch_overlap,
         )
 
-        path = Path(out_path)
+        path = self._resolve_output_path(out_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         suffix = path.suffix.lower()
         formats = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP"}
@@ -419,6 +464,43 @@ class StreetViewDataset:
             validator=valid,
             source="bbox",
             source_value=f"{west},{south},{east},{north}",
+            download=download,
+            yaw=yaw,
+            pitch=pitch,
+            fov=fov,
+            width=width,
+            height=height,
+            max_queries=max_queries,
+        )
+
+    def geojson(
+        self,
+        path: str | Path,
+        count: int,
+        *,
+        download: ImageMode = "none",
+        yaw: float | Literal["random"] = "random",
+        pitch: float = 0.0,
+        fov: float = 90.0,
+        width: int = 1024,
+        height: int = 1024,
+        max_queries: int | None = None,
+    ) -> HarvestResult:
+        """Collect random unique panoramas inside polygonal GeoJSON."""
+        geometry = load_geojson(path)
+
+        def sampler(n: int) -> list[tuple[float, float]]:
+            return geometry.sample(self.rng, n)
+
+        def valid(pano: Panorama) -> bool:
+            return geometry.covers(pano.lat, pano.lon)
+
+        return self._collect(
+            count,
+            sampler=sampler,
+            validator=valid,
+            source="geojson",
+            source_value=str(path),
             download=download,
             yaw=yaw,
             pitch=pitch,

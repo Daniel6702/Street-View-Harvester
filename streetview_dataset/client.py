@@ -119,11 +119,13 @@ class StreetViewClient:
         if not 1.0 <= fov < 180.0:
             raise ValueError("fov must be in [1, 180)")
 
+        endpoint_pitch = -float(pitch)
+
         url = (
             "https://streetviewpixels-pa.googleapis.com/v1/thumbnail"
             f"?panoid={panoid}&cb_client=maps_sv.tactile.gps"
             f"&w={int(width)}&h={int(height)}&yaw={float(yaw):.6f}"
-            f"&pitch={float(pitch):.6f}&thumbfov={float(fov):g}"
+            f"&pitch={endpoint_pitch:.6f}&thumbfov={float(fov):g}"
         )
         response = self._get(url, timeout=self.image_timeout)
         return response.content

@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from threading import Event, Thread
 
 import numpy as np
@@ -107,3 +109,54 @@ def test_country_writes_unsharded_flat_images_when_disabled(tmp_path, monkeypatc
 
     assert result.added_count == 1
     assert (tmp_path / "images" / "pano.jpg").read_bytes() == b"image"
+
+
+def test_geojson_accepts_resolved_panorama_on_boundary(tmp_path: Path, monkeypatch):
+    path = tmp_path / "area.geojson"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = StreetViewDataset(workers=1, seed=42)
+    monkeypatch.setattr(
+        dataset.client,
+        "find_nearest",
+        lambda _lat, _lon: Panorama("boundary", 0.0, 0.0),
+    )
+
+    result = dataset.geojson(path, 1, max_queries=1)
+
+    assert result.complete
+    assert result.added_count == 1
+    assert result.rows is not None
+    assert result.rows[0]["source"] == "geojson"
+
+
+def test_geojson_rejects_resolved_panorama_outside(tmp_path: Path, monkeypatch):
+    path = tmp_path / "area.geojson"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "Polygon",
+                "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = StreetViewDataset(workers=1, seed=42)
+    monkeypatch.setattr(
+        dataset.client,
+        "find_nearest",
+        lambda _lat, _lon: Panorama("outside", 2.0, 2.0),
+    )
+
+    result = dataset.geojson(path, 1, max_queries=1)
+
+    assert not result.complete
+    assert result.added_count == 0
+    assert result.queries == 1
