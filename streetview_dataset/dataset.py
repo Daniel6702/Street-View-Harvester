@@ -733,16 +733,28 @@ class StreetViewDataset:
                 if monitor_server is not None:
                     elapsed = max(0.0, time.monotonic() - rate_started_at)
                     rate_per_second = added / elapsed if elapsed > 0.0 else 0.0
+                    queries_per_second = queries / elapsed if elapsed > 0.0 else 0.0
+                    images_per_second = rate_per_second if unit == "image" else None
+                    current = existing_count + added
+                    updated_at = time.time()
+                    estimated_finish_at = (
+                        updated_at + (count - current) / rate_per_second
+                        if state == "running" and rate_per_second > 0.0
+                        else None
+                    )
                     monitor_server.publish(
                         _ProgressSnapshot(
                             state=state,
-                            current=existing_count + added,
+                            current=current,
                             target=count,
                             added=added,
                             queries=queries,
                             unit=unit,
-                            last_update=time.time(),
+                            last_update=updated_at,
                             rate_per_second=rate_per_second,
+                            queries_per_second=queries_per_second,
+                            images_per_second=images_per_second,
+                            estimated_finish_at=estimated_finish_at,
                         )
                     )
 
@@ -757,6 +769,9 @@ class StreetViewDataset:
                         unit=unit,
                         last_update=time.time(),
                         rate_per_second=0.0,
+                        queries_per_second=0.0,
+                        images_per_second=None,
+                        estimated_finish_at=None,
                     )
                 )
 

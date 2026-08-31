@@ -20,6 +20,9 @@ def _snapshot(
     queries: int = 3,
     unit: str = "panorama",
     rate_per_second: float = 0.0,
+    queries_per_second: float = 0.0,
+    images_per_second: float | None = None,
+    estimated_finish_at: float | None = None,
 ) -> _ProgressSnapshot:
     return _ProgressSnapshot(
         state=state,
@@ -30,6 +33,9 @@ def _snapshot(
         unit=unit,
         last_update=1_700_000_000.0,
         rate_per_second=rate_per_second,
+        queries_per_second=queries_per_second,
+        images_per_second=images_per_second,
+        estimated_finish_at=estimated_finish_at,
     )
 
 
@@ -61,7 +67,9 @@ def test_monitor_routes_headers_and_scalar_payload() -> None:
         assert headers["X-Content-Type-Options"] == "nosniff"
         assert int(headers["Content-Length"]) == len(body)
         assert b"Harvest monitor" in body
-        assert b"Pace" in body
+        assert b"Queries / second" in body
+        assert b"Images / second" in body
+        assert b"Estimated finish" in body
 
         status, headers, body = _request(f"{monitor.url}api/v1/progress")
         assert status == 200
@@ -75,6 +83,9 @@ def test_monitor_routes_headers_and_scalar_payload() -> None:
             "unit",
             "last_update",
             "rate_per_second",
+            "queries_per_second",
+            "images_per_second",
+            "estimated_finish_at",
         }
         assert payload["state"] == "running"
         assert payload["current"] == 2
@@ -83,7 +94,10 @@ def test_monitor_routes_headers_and_scalar_payload() -> None:
         assert payload["queries"] == 3
         assert payload["unit"] == "panorama"
         assert payload["rate_per_second"] == 0.0
-        assert all(isinstance(value, (str, int, float)) for value in payload.values())
+        assert payload["queries_per_second"] == 0.0
+        assert payload["images_per_second"] is None
+        assert payload["estimated_finish_at"] is None
+        assert all(isinstance(value, (str, int, float, type(None))) for value in payload.values())
         assert headers["Cache-Control"] == "no-store"
         assert headers["X-Content-Type-Options"] == "nosniff"
 
@@ -116,6 +130,9 @@ def test_monitor_updates_only_whitelisted_scalar_status() -> None:
                 unit="image",
                 last_update=1_700_000_001.0,
                 rate_per_second=2.5,
+                queries_per_second=4.0,
+                images_per_second=2.5,
+                estimated_finish_at=1_700_000_002.0,
             )
         )
         _, _, body = _request(f"{monitor.url}api/v1/progress")
@@ -124,6 +141,9 @@ def test_monitor_updates_only_whitelisted_scalar_status() -> None:
         assert payload["current"] == 5
         assert payload["unit"] == "image"
         assert payload["rate_per_second"] == 2.5
+        assert payload["queries_per_second"] == 4.0
+        assert payload["images_per_second"] == 2.5
+        assert payload["estimated_finish_at"] == 1_700_000_002.0
         assert "source" not in payload
         assert "source_value" not in payload
         assert "secret" not in body.decode()
@@ -195,6 +215,8 @@ def test_dataset_publishes_monitor_progress_from_coordinator(monkeypatch, tmp_pa
     assert monitor.start_thread_ids == [coordinator_id]
     assert monitor.initial is not None
     assert monitor.initial.rate_per_second == 0.0
+    assert monitor.initial.queries_per_second == 0.0
+    assert monitor.initial.images_per_second is None
     assert any(snapshot.rate_per_second > 0.0 for snapshot in monitor.published_snapshots)
     assert all(snapshot.rate_per_second >= 0.0 for snapshot in monitor.published_snapshots)
     assert set(monitor.publish_thread_ids) == {coordinator_id}
@@ -245,9 +267,14 @@ def test_dataset_rate_counts_only_new_additions(monkeypatch, tmp_path) -> None:
     assert monitor.initial is not None
     assert monitor.initial.current == 1
     assert monitor.initial.rate_per_second == 0.0
+    assert monitor.initial.queries_per_second == 0.0
+    assert monitor.initial.images_per_second is None
     assert final_snapshot.current == 2
     assert final_snapshot.added == 1
     assert final_snapshot.rate_per_second == 0.25
+    assert final_snapshot.queries_per_second == 0.25
+    assert final_snapshot.images_per_second is None
+    assert final_snapshot.estimated_finish_at is None
 
 
 def test_live_http_monitor_exposes_progress_before_harvest_finishes(monkeypatch, tmp_path) -> None:
@@ -313,6 +340,9 @@ def test_live_http_monitor_exposes_progress_before_harvest_finishes(monkeypatch,
     assert payload["current"] == 1
     assert payload["added"] == 1
     assert payload["rate_per_second"] >= 0.0
+    assert payload["queries_per_second"] >= 0.0
+    assert payload["images_per_second"] >= 0.0
+    assert payload["estimated_finish_at"] is not None
 
     release_second_render.set()
     assert finished.wait(timeout=2.0)

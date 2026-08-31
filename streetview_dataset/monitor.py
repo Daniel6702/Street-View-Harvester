@@ -41,6 +41,9 @@ class _ProgressSnapshot:
     unit: ProgressUnit
     last_update: float
     rate_per_second: float
+    queries_per_second: float = 0.0
+    images_per_second: float | None = None
+    estimated_finish_at: float | None = None
 
     def as_json(self) -> str:
         """Serialize the explicit scalar status whitelist."""
@@ -54,6 +57,9 @@ class _ProgressSnapshot:
                 "unit": self.unit,
                 "last_update": self.last_update,
                 "rate_per_second": self.rate_per_second,
+                "queries_per_second": self.queries_per_second,
+                "images_per_second": self.images_per_second,
+                "estimated_finish_at": self.estimated_finish_at,
             },
             separators=(",", ":"),
         )
